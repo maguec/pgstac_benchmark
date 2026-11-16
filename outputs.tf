@@ -19,5 +19,5 @@ output "e-postgres-psql-pooled" {
 }
 
 output "f-vm-benchmark-workflow" {
-  value = "stac_ingest 4 500 && alloydb_columnarize && stac_benchmark 10,50,100,150 1m results.csv"
+  value = "stac_ingest 4 500 50000 && alloydb_columnarize && stac_benchmark 10,50,100,150 1m results.csv"
 }

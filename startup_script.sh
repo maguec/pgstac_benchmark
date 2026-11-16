@@ -44,7 +44,7 @@ psql_postgres_pooled() { psql "$${POSTGRES_POOLED_URL}" "$@"; }
 stac_ingest() {
   local cols="$${1:-4}"
   local items="$${2:-500}"
-  local target_per_col="$${3:-25000}"
+  local target_per_col="$${3:-50000}"
   if [ "$${ALLOYDB_IP}" != "disabled" ]; then
     echo "=== Ingesting $${cols} collections x $${items} base items into AlloyDB ($${ALLOYDB_API_URL}) ==="
     stac-api-load-testing --ingest --api-address "$${ALLOYDB_API_URL}" --collections "$${cols}" --items-per-collection "$${items}"
@@ -62,7 +62,7 @@ stac_scale_sql() {
   local target_per_col="$${2:-50000}"
   local max_batch=$(( (target_per_col / 100) - 1 ))
   echo "=== Scaling each collection to $${target_per_col} items & tuning pgstac_settings on $${db_url} ==="
-  psql "$${db_url}" << EOSQL
+  psql "$${db_url}" -v max_batch="$${max_batch}" << 'EOSQL'
 SET synchronous_commit = off;
 ALTER TABLE pgstac.items
   ADD COLUMN IF NOT EXISTS platform text GENERATED ALWAYS AS (content -> 'properties' ->> 'platform') STORED,
@@ -77,7 +77,7 @@ CREATE OR REPLACE FUNCTION pgstac.queryable_column(dotpath text)
  RETURNS text
  LANGUAGE sql
  IMMUTABLE PARALLEL SAFE
-AS \$function\$
+AS $function$
     SELECT CASE pgstac.strip_properties_prefix(dotpath)
         WHEN 'start_datetime' THEN 'datetime'
         WHEN 'id' THEN 'id'
@@ -89,14 +89,14 @@ AS \$function\$
         WHEN 'constellation' THEN 'constellation'
         WHEN 'sentinel:grid_square' THEN 'grid_square'
     END;
-\$function\$;
+$function$;
 
 CREATE OR REPLACE FUNCTION pgstac.stac_search_to_where(j jsonb)
  RETURNS text
  LANGUAGE plpgsql
  STABLE
  SET search_path TO 'pgstac', 'public'
-AS \$function\$
+AS $function$
 DECLARE
     where_segments text[];
     _where text;
@@ -129,13 +129,13 @@ BEGIN
     IF j ? 'q' THEN
         ft_query := q_to_tsquery(j->'q');
         where_segments := where_segments || format(
-            \$quote\$
+            $quote$
             (
                 to_tsvector('english', content->'properties'->>'description') ||
                 to_tsvector('english', coalesce(content->'properties'->>'title', '')) ||
                 to_tsvector('english', coalesce(content->'properties'->>'keywords', ''))
             ) @@ %L
-            \$quote\$,
+            $quote$,
             ft_query
         );
     END IF;
@@ -157,7 +157,7 @@ BEGIN
         j->>'filter-lang',
         get_setting('default_filter_lang', j->'conf')
     );
-    IF NOT filter @? '\$.**.op' THEN
+    IF NOT filter @? '$.**.op' THEN
         filterlang := 'cql-json';
     END IF;
     IF filterlang NOT IN ('cql-json','cql2-json') AND j ? 'filter' THEN
@@ -181,12 +181,12 @@ BEGIN
     END IF;
     RETURN _where;
 END;
-\$function\$;
+$function$;
 
-DELETE FROM pgstac.items WHERE id ~ '-[5-9][0-9]{2}\$' OR id ~ '-[1-9][0-9]{3,}\$';
+DELETE FROM pgstac.items WHERE id ~ '-[5-9][0-9]{2}$' OR id ~ '-[1-9][0-9]{3,}$';
 INSERT INTO pgstac.items (id, geometry, collection, datetime, end_datetime, content, private)
 SELECT
-  regexp_replace(id, '-1([0-9]{2})\$', '-' || (batch * 100 + substring(id from '-1([0-9]{2})\$')::int)),
+  regexp_replace(id, '-1([0-9]{2})$', '-' || (batch * 100 + substring(id from '-1([0-9]{2})$')::int)),
   geometry,
   collection,
   datetime,
@@ -194,12 +194,12 @@ SELECT
   jsonb_set(
     content,
     '{id}',
-    to_jsonb(regexp_replace(id, '-1([0-9]{2})\$', '-' || (batch * 100 + substring(id from '-1([0-9]{2})\$')::int)))
+    to_jsonb(regexp_replace(id, '-1([0-9]{2})$', '-' || (batch * 100 + substring(id from '-1([0-9]{2})$')::int)))
   ),
   private
 FROM pgstac.items
-CROSS JOIN generate_series(5, $${max_batch}) AS batch
-WHERE id ~ '-1[0-9]{2}\$';
+CROSS JOIN generate_series(5, :max_batch) AS batch
+WHERE id ~ '-1[0-9]{2}$';
 
 UPDATE pgstac.pgstac_settings SET value = 'on' WHERE name = 'context';
 UPDATE pgstac.pgstac_settings SET value = '0 seconds' WHERE name = 'context_stats_ttl';
@@ -216,7 +216,7 @@ alloydb_columnarize() {
     echo "AlloyDB is disabled."
     return 1
   fi
-  echo "=== Populating pgstac.items leaf partitions & CQL2 JSONB virtual columns into AlloyDB Columnar Engine ==="
+  echo "=== Populating pgstac.items leaf partitions & CQL2/BBox columns into AlloyDB Columnar Engine ==="
   psql "$${ALLOYDB_DIRECT_URL}" << 'EOSQL'
 CREATE EXTENSION IF NOT EXISTS google_columnar_engine;
 
@@ -232,16 +232,8 @@ ANALYZE pgstac.items;
 
 SELECT
   relid::text AS partition_name,
+  google_columnar_engine_drop(relation => relid::text) AS dropped_existing,
   google_columnar_engine_add(relation => relid::text) AS added_table
-FROM pg_partition_tree('pgstac.items'::regclass)
-WHERE isleaf = true;
-
-SELECT
-  relid::text AS partition_name,
-  google_columnar_engine_add(
-    relation => relid::text,
-    expressions => $expr$"content -> 'properties'", "content -> 'properties' ->> 'platform'", "content -> 'properties' ->> 'constellation'", "content -> 'properties' ->> 'sentinel:grid_square'"$expr$
-  ) AS added_cql2_expressions
 FROM pg_partition_tree('pgstac.items'::regclass)
 WHERE isleaf = true;
 

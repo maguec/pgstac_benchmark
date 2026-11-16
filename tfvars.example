@@ -1,0 +1,13 @@
+project_name         = "myproject"
+gcp_credentials_path = "/Users/me/.config/gcloud/application_default_credentials.json"
+ssh_pub_key_path     = "/Users/me/.ssh/id_rsa.pub"
+
+enable_alloydb            = true
+enable_postgres           = true
+enable_connection_pooling = true
+postgres_version          = "POSTGRES_18"
+
+machine_type      = "n2-standard-16"
+alloydb_cpu_count = 8
+postgres_tier     = "db-perf-optimized-N-8"
+postgres_edition  = "ENTERPRISE_PLUS"
